@@ -812,14 +812,33 @@ def register_keyword_tools(mcp: FastMCP):
                     location_ids=location_ids
                 )
 
-                output = f"# Keyword Traffic Estimation\n\n"
-                output += f"**Keywords Analyzed**: {result['keywords_analyzed']}\n\n"
-                output += f"{result['message']}\n\n"
-                output += f"**Note**: {result['note']}\n\n"
-                output += "To enable full traffic estimation:\n"
-                output += "1. Set up Keyword Planner in your Google Ads account\n"
-                output += "2. Create a Keyword Plan via the API\n"
-                output += "3. Use KeywordPlanIdeaService for detailed forecasts\n"
+                # The manager delegates this to get_keyword_ideas, which returns
+                # total_ideas/keyword_ideas. This formatter still expected the fields of
+                # the stub it used to call — keywords_analyzed, message, note — so it
+                # raised KeyError on a response that was actually fine. Reading the real
+                # shape means the volume and bid data the caller asked for is what comes
+                # back, instead of an apology for not having it.
+                ideas = result.get("keyword_ideas", [])
+
+                output = "# Keyword Traffic Estimation\n\n"
+                output += f"**Keywords analysed**: {result.get('total_ideas', len(ideas))}\n"
+                output += f"**Locations**: {', '.join(result.get('locations', []))}\n\n"
+
+                if not ideas:
+                    return output + "_No data returned for these keywords._\n"
+
+                output += "| Keyword | Avg monthly searches | Competition | Top-of-page bid (low–high) |\n"
+                output += "|---|---:|---|---|\n"
+                for idea in ideas[:50]:
+                    output += (
+                        f"| {idea['keyword_text']} "
+                        f"| {idea['avg_monthly_searches']:,} "
+                        f"| {idea['competition']} "
+                        f"| ${idea['low_top_of_page_bid']:.2f} – ${idea['high_top_of_page_bid']:.2f} |\n"
+                    )
+
+                if len(ideas) > 50:
+                    output += f"\n_Showing 50 of {len(ideas)}._\n"
 
                 return output
 
@@ -1054,26 +1073,23 @@ def register_keyword_tools(mcp: FastMCP):
                 for i, kw in enumerate(keywords, 1):
                     output += f"{i}. **{kw['text']}** ({kw.get('match_type', 'BROAD')})\n"
 
-                output += "\n## Forecast Metrics\n\n"
-                output += f"**Note**: {result['note']}\n\n"
-
-                output += "Expected metrics structure:\n"
-                for metric, value in result['forecast_metrics'].items():
-                    output += f"- **{metric.replace('_', ' ').title()}**: {value}\n"
-
-                output += "\n## About Forecasts\n"
-                output += "Keyword forecasts require creating a temporary keyword plan which:\n"
-                output += "1. Creates a keyword plan structure\n"
-                output += "2. Adds campaigns, ad groups, and keywords\n"
-                output += "3. Generates traffic projections\n"
-                output += "4. Cleans up temporary resources\n\n"
-
-                output += "Forecast metrics include:\n"
-                output += "- **Impressions**: Projected ad views\n"
-                output += "- **Clicks**: Projected clicks\n"
-                output += "- **Cost**: Projected spend\n"
-                output += "- **CTR**: Click-through rate\n"
-                output += "- **Average CPC**: Average cost per click\n"
+                # Real numbers now: forecast_keyword_metrics calls
+                # KeywordPlanIdeaService.generate_keyword_forecast_metrics instead of
+                # describing what it would return if it were implemented. The old block
+                # here printed result['note'] and a list of metric names, both of which
+                # the live response has no reason to carry.
+                metrics = result.get("forecast_metrics", {})
+                output += f"**Window**: {result.get('start_date')} to {result.get('end_date')}\n\n"
+                output += "## Forecast\n\n"
+                output += f"- **Clicks**: {metrics.get('clicks', 0):,.0f}\n"
+                output += f"- **Cost**: ${metrics.get('cost', 0):,.2f}\n"
+                output += f"- **Average CPC**: ${metrics.get('average_cpc', 0):,.2f}\n"
+                output += f"- **Conversions**: {metrics.get('conversions', 0):,.2f}\n"
+                output += f"- **Average CPA**: ${metrics.get('average_cpa', 0):,.2f}\n\n"
+                output += (
+                    "_Projected for the window above at the given CPC bid. Google returns "
+                    "no impression estimate from this endpoint._\n"
+                )
 
                 return output
 

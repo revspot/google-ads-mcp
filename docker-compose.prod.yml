@@ -1,0 +1,35 @@
+# google-ads-mcp — prod deployment.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Its own compose project name, like every revspot-mcp environment on this box: sharing
+# a project makes the other containers look like orphans, and one --remove-orphans then
+# takes them down. There is deliberately no plain docker-compose.yml.
+#
+# One environment for now. A beta/staging pair would be another file each, on 5009/5010,
+# pointed at whichever Google Ads accounts those environments should touch — worth having
+# only once there is a test MCC, since otherwise all of them spend the same live budget.
+name: google-ads-mcp-prod
+
+services:
+  google-ads:
+    build:
+      context: .
+    image: google-ads-mcp
+    container_name: google-ads-mcp-prod
+    restart: unless-stopped
+    # loopback only — nginx terminates TLS and gates the path in front of it
+    ports: ["127.0.0.1:5008:5008"]
+    env_file: [.env]
+    environment:
+      PORT: 5008
+      # No GOOGLE_ADS_REFRESH_TOKEN here on purpose: refresh tokens are per revspot
+      # client and live in the DB revspot-backend and the harness share. One set here
+      # would make every request act as that single client — the thing this deployment
+      # exists to avoid. Only the app-level OAuth client comes from .env.
+    logging:
+      # the box is small; uncapped json-file logs fill the disk eventually
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

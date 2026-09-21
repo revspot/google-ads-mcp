@@ -15,6 +15,7 @@ Provides complete keyword lifecycle management including:
 from google.ads.googleads.client import GoogleAdsClient
 from google.protobuf import field_mask_pb2
 from typing import Optional, List, Dict, Any
+from datetime import date, timedelta
 from dataclasses import dataclass
 from enum import Enum
 from utils.logger import get_logger
@@ -775,78 +776,81 @@ class KeywordManager:
         Returns:
             Dictionary with forecast metrics
         """
-        keyword_plan_service = self.client.get_service("KeywordPlanService")
+        # KeywordPlanIdeaService, not KeywordPlanService: the modern API forecasts from a
+        # campaign described inline, so there is no temporary KeywordPlan to create, use
+        # and clean up — and nothing left behind in the account if this raises halfway.
+        #
+        # The old code here reached for the message type KeywordPlanForecastInterval,
+        # which no longer exists in v25 (the enum of the same name does, which is why the
+        # error read as a missing type rather than a missing field). The forecast window
+        # is an explicit DateRange now.
+        service = self.client.get_service("KeywordPlanIdeaService")
+        request = self.client.get_type("GenerateKeywordForecastMetricsRequest")
+        request.customer_id = str(customer_id).replace("-", "")
 
-        # Create a temporary keyword plan for forecasting
-        # Note: This creates and immediately uses a plan, then removes it
+        # Forecasts are about the future, so the window starts tomorrow: a range that
+        # includes today is rejected.
+        days = {"NEXT_WEEK": 7, "NEXT_MONTH": 30, "NEXT_QUARTER": 90}.get(
+            (date_interval or "").upper(), 30
+        )
+        start_day = date.today() + timedelta(days=1)
+        request.forecast_period.start_date = start_day.isoformat()
+        request.forecast_period.end_date = (start_day + timedelta(days=days - 1)).isoformat()
 
-        # Build campaign for keyword plan
-        campaign = self.client.get_type("KeywordPlanCampaign")
+        campaign = request.campaign
+        campaign.language_constants.append(f"languageConstants/{language_id or 1000}")
+        for location_id in (location_ids or ["2840"]):
+            campaign.geo_target_constants.append(f"geoTargetConstants/{location_id}")
 
-        # Set network
-        network_enum = self.client.enums.KeywordPlanNetworkEnum
-        campaign.keyword_plan_network = network_enum.GOOGLE_SEARCH
+        # A bidding strategy is required — the forecast is "what would this bid buy".
+        # Manual CPC keeps the answer attributable to the bid the caller passed.
+        campaign.bidding_strategy.manual_cpc_bidding_strategy.max_cpc_bid_micros = (
+            cpc_bid_micros or 1_000_000
+        )
 
-        # Set geo targets
-        if location_ids:
-            for location_id in location_ids:
-                geo_target = self.client.get_type("KeywordPlanGeoTarget")
-                geo_target.geo_target_constant = f"geoTargetConstants/{location_id}"
-                campaign.geo_targets.append(geo_target)
-        else:
-            geo_target = self.client.get_type("KeywordPlanGeoTarget")
-            geo_target.geo_target_constant = "geoTargetConstants/2840"
-            campaign.geo_targets.append(geo_target)
+        match_types = self.client.enums.KeywordMatchTypeEnum
+        ad_group = self.client.get_type("ForecastAdGroup")
+        for keyword in keywords:
+            # Accepts {"text": ..., "match_type": ...} or a bare string.
+            if isinstance(keyword, dict):
+                text = keyword.get("text", "")
+                match_type = (keyword.get("match_type") or "BROAD").upper()
+            else:
+                text, match_type = str(keyword), "BROAD"
+            if not text:
+                continue
+            info = self.client.get_type("KeywordInfo")
+            info.text = text
+            info.match_type = getattr(match_types, match_type, match_types.BROAD)
+            ad_group.keywords.append(info)
 
-        # Set language
-        if language_id:
-            campaign.language_constants.append(f"languageConstants/{language_id}")
-        else:
-            campaign.language_constants.append("languageConstants/1000")
-
-        # Set CPC bid
-        if cpc_bid_micros:
-            campaign.cpc_bid_micros = cpc_bid_micros
-
-        # Create keyword plan request
-        keyword_plan = self.client.get_type("KeywordPlan")
-        keyword_plan.name = f"Forecast Plan {customer_id}"
-
-        # Set forecast interval
-        forecast_interval = self.client.get_type("KeywordPlanForecastInterval")
-        if date_interval == "NEXT_WEEK":
-            forecast_interval.date_interval = self.client.enums.KeywordPlanForecastIntervalEnum.NEXT_WEEK
-        elif date_interval == "NEXT_MONTH":
-            forecast_interval.date_interval = self.client.enums.KeywordPlanForecastIntervalEnum.NEXT_MONTH
-        elif date_interval == "NEXT_QUARTER":
-            forecast_interval.date_interval = self.client.enums.KeywordPlanForecastIntervalEnum.NEXT_QUARTER
-
-        keyword_plan.forecast_period = forecast_interval
+        if not ad_group.keywords:
+            raise ValueError("no keywords to forecast")
+        campaign.ad_groups.append(ad_group)
 
         try:
-            # This is a simplified approach - full implementation would:
-            # 1. Create keyword plan
-            # 2. Create campaign in plan
-            # 3. Create ad group in campaign
-            # 4. Add keywords to ad group
-            # 5. Generate forecast
-            # 6. Clean up plan
+            response = service.generate_keyword_forecast_metrics(request=request)
+            metrics = response.campaign_forecast_metrics
 
-            # For now, return structure showing expected forecast data
-            logger.info(f"Forecast requested for {len(keywords)} keywords over {date_interval}")
+            def _micros(value):
+                return round(value / 1_000_000, 2) if value else 0.0
+
+            clicks = round(metrics.clicks, 2) if metrics.clicks else 0.0
+            cost = _micros(metrics.cost_micros)
 
             return {
-                "keywords_forecasted": len(keywords),
+                "keywords_forecasted": len(ad_group.keywords),
                 "forecast_period": date_interval,
-                "cpc_bid": (cpc_bid_micros / 1_000_000) if cpc_bid_micros else None,
-                "note": "Forecast generation requires creating temporary keyword plan",
+                "start_date": request.forecast_period.start_date,
+                "end_date": request.forecast_period.end_date,
+                "cpc_bid": _micros(cpc_bid_micros) if cpc_bid_micros else 1.0,
                 "forecast_metrics": {
-                    "impressions": "Available with full implementation",
-                    "clicks": "Available with full implementation",
-                    "cost": "Available with full implementation",
-                    "ctr": "Available with full implementation",
-                    "average_cpc": "Available with full implementation"
-                }
+                    "clicks": clicks,
+                    "cost": cost,
+                    "average_cpc": _micros(metrics.average_cpc_micros),
+                    "conversions": round(metrics.conversions, 2) if metrics.conversions else 0.0,
+                    "average_cpa": _micros(metrics.average_cpa_micros),
+                },
             }
 
         except Exception as e:

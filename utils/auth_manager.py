@@ -11,6 +11,8 @@ Enhanced authentication handling with:
 
 import json
 import logging
+import os
+import threading
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,6 +20,8 @@ from google.ads.googleads.client import GoogleAdsClient
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from google.auth.exceptions import RefreshError
+
+from utils.request_context import Tenant, get_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -129,26 +133,35 @@ class GoogleAdsAuthManager:
         self._clients: Dict[str, GoogleAdsClient] = {}
         self._token_managers: Dict[str, TokenManager] = {}
         self._current_client_key: Optional[str] = None
+        # Guards the lazy per-tenant init in _client_for_tenant. Two concurrent requests
+        # for the same unseen tenant would otherwise both build a client, and both pay
+        # the token round trip in validate_token().
+        self._tenant_lock = threading.Lock()
 
     def initialize_oauth(
         self,
-        developer_token: str,
+        developer_token: Optional[str],
         client_id: str,
         client_secret: str,
         refresh_token: str,
         login_customer_id: Optional[str] = None,
-        client_key: str = "default"
+        client_key: str = "default",
+        make_current: bool = True
     ) -> str:
         """
         Initialize Google Ads client with OAuth2.
 
         Args:
-            developer_token: Google Ads developer token
+            developer_token: Google Ads developer token. Optional since the
+                2026-09-09 sunset; sent when present, ignored by the API.
             client_id: OAuth2 client ID
             client_secret: OAuth2 client secret
             refresh_token: OAuth2 refresh token
             login_customer_id: Optional MCC account ID
             client_key: Unique identifier for this client session
+            make_current: Point the process-wide "current client" at this one. False for
+                per-request tenants served over HTTP, where the current client is a
+                ContextVar and this global would only be a way to cross tenants over.
 
         Returns:
             Client key for this session
@@ -170,12 +183,18 @@ class GoogleAdsAuthManager:
 
             # Build credentials dict
             credentials = {
-                "developer_token": developer_token,
                 "client_id": client_id,
                 "client_secret": client_secret,
                 "refresh_token": refresh_token,
                 "use_proto_plus": True
             }
+
+            # Developer tokens were sunset on 2026-09-09: the header is accepted but
+            # ignored, and API access level is now granted to the Google Cloud project
+            # that issued the OAuth client. Still sent when we have one, because older
+            # library versions require the field, but no longer required to be present.
+            if developer_token:
+                credentials["developer_token"] = developer_token
 
             if login_customer_id:
                 credentials["login_customer_id"] = login_customer_id
@@ -186,7 +205,8 @@ class GoogleAdsAuthManager:
             # Store client and token manager
             self._clients[client_key] = client
             self._token_managers[client_key] = token_manager
-            self._current_client_key = client_key
+            if make_current:
+                self._current_client_key = client_key
 
             logger.info(f"Google Ads client initialized: {client_key}")
 
@@ -249,12 +269,59 @@ class GoogleAdsAuthManager:
             logger.error(f"Failed to initialize service account client: {e}")
             raise AuthenticationError(f"Service account initialization failed: {e}")
 
+    def _client_for_tenant(self, tenant: Tenant) -> GoogleAdsClient:
+        """Get (or lazily build) the Google Ads client for one revspot client.
+
+        Built once per tenant and cached: initialize_oauth validates the refresh token by
+        actually refreshing it, so building per request would put a round trip to Google's
+        token endpoint in front of every tool call.
+        """
+        client = self._clients.get(tenant.client_key)
+        if client is not None:
+            return client
+
+        with self._tenant_lock:
+            # Re-check: another request may have built it while we waited.
+            client = self._clients.get(tenant.client_key)
+            if client is not None:
+                return client
+
+            client_id = os.getenv("GOOGLE_ADS_CLIENT_ID")
+            client_secret = os.getenv("GOOGLE_ADS_CLIENT_SECRET")
+            if not (client_id and client_secret):
+                raise AuthenticationError(
+                    "GOOGLE_ADS_CLIENT_ID and GOOGLE_ADS_CLIENT_SECRET must be set to "
+                    "serve per-request tenants."
+                )
+
+            login_customer_id = (
+                tenant.login_customer_id or os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
+            )
+            if login_customer_id:
+                login_customer_id = login_customer_id.replace("-", "")
+
+            self.initialize_oauth(
+                developer_token=os.getenv("GOOGLE_ADS_DEVELOPER_TOKEN"),
+                client_id=client_id,
+                client_secret=client_secret,
+                refresh_token=tenant.refresh_token,
+                login_customer_id=login_customer_id,
+                client_key=tenant.client_key,
+                # Never touch the process-wide current client: it is shared by every
+                # request, and pointing it at this tenant is exactly the cross-tenant
+                # bug this whole path exists to avoid.
+                make_current=False,
+            )
+            return self._clients[tenant.client_key]
+
     def get_client(self, client_key: Optional[str] = None) -> GoogleAdsClient:
         """
         Get Google Ads client for the specified key.
 
         Args:
-            client_key: Client key (uses current if None)
+            client_key: Client key. None means "whoever this request is acting as" —
+                the request's tenant if there is one, else the process-wide current
+                client (the stdio case, where there is only ever one user).
 
         Returns:
             Google Ads client
@@ -262,6 +329,14 @@ class GoogleAdsAuthManager:
         Raises:
             AuthenticationError: If client not found
         """
+        # Every one of the 139 tools calls get_client() with no argument, so this is the
+        # single place a request's identity has to be resolved. Tenant first: under HTTP
+        # the global below belongs to no one in particular.
+        if client_key is None:
+            tenant = get_tenant()
+            if tenant is not None:
+                return self._client_for_tenant(tenant)
+
         key = client_key or self._current_client_key
 
         if key is None:

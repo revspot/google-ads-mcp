@@ -525,7 +525,10 @@ def _auto_initialize_from_env():
     rtoken = os.getenv("GOOGLE_ADS_REFRESH_TOKEN")
     login_id = os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
 
-    if not all([dev_token, cid, csecret, rtoken]):
+    # The developer token is deliberately not required: it was sunset on 2026-09-09
+    # and is now ignored by the API, so demanding one here would refuse a perfectly
+    # good credential set and leave the server up with no client at all.
+    if not all([cid, csecret, rtoken]):
         logger.info("Env credentials incomplete – manual google_ads_initialize required")
         return False
 
