@@ -6,7 +6,8 @@ Upstream ships a stdio server: one process per user, one global Google Ads clien
 credentials read from the environment at import. Served over HTTP for many revspot
 clients none of that holds, so this module adds the three things that do:
 
-  * a tenant per request, taken from headers and bound to a ContextVar, so the 139 tools
+  * a tenant per request, taken from headers (several accepted spellings each, see
+    HEADERS_CLIENT_KEY) and bound to a ContextVar, so the 139 tools
     can keep calling get_client() with no argument and still get the right account
     (see utils/auth_manager.py and utils/request_context.py);
   * the /google-ads prefix the public vhost serves this on, stripped here rather than in
@@ -42,10 +43,43 @@ PATH_PREFIX = "/google-ads"
 
 # Which revspot client this request acts as. The harness reads both from the DB it
 # shares with revspot-backend and sends them on every request.
-HEADER_CLIENT_KEY = "x-revspot-client-id"
-HEADER_REFRESH_TOKEN = "x-google-ads-refresh-token"
+#
+# Several spellings per field, tried in order, first one present wins. Not indecision:
+# custom headers have to be approved before a client may send them, so the names that
+# survive that process are not always the names this server would have chosen, and a
+# rename is not a thing either side can do unilaterally. Accepting the alternates costs
+# a dict lookup and saves a deployment from turning on a header nobody can change.
+HEADERS_CLIENT_KEY = (
+    "x-revspot-client-id",
+    "x-workspace-id",
+    # Approved with the transposition; kept until we know which spelling is real.
+    "x-worskpace-id",
+)
+
+# Every one of these must carry a REFRESH token, whatever the name says.
+# initialize_oauth builds Credentials(token=None, refresh_token=...) and mints its own
+# access token, so a real OAuth access token put here fails to refresh — and would be
+# an hour from expiry anyway, while the client built from it is cached for the life of
+# the process. x-access-token is an alias for the field, not a change of what goes in it.
+HEADERS_REFRESH_TOKEN = (
+    "x-google-ads-refresh-token",
+    "x-access-token",
+)
+
 # Optional per-tenant override for clients that sit under a different manager account.
-HEADER_LOGIN_CUSTOMER_ID = "x-google-ads-login-customer-id"
+HEADERS_LOGIN_CUSTOMER_ID = (
+    "x-google-ads-login-customer-id",
+    "x-login-customer-id",
+)
+
+
+def _first_header(headers: dict, names) -> str:
+    """The value of the first of `names` present and non-empty, else ""."""
+    for name in names:
+        value = headers.get(name, "").strip()
+        if value:
+            return value
+    return ""
 
 # Stateless: every POST stands alone, with no session carried between requests. That is
 # the honest model here — the credential arrives per request, so a session that outlived
@@ -149,15 +183,17 @@ class TenantFromHeaders:
 
         headers = {k.decode("latin-1").lower(): v.decode("latin-1")
                    for k, v in scope.get("headers", [])}
-        client_key = headers.get(HEADER_CLIENT_KEY, "").strip()
-        refresh_token = headers.get(HEADER_REFRESH_TOKEN, "").strip()
+        client_key = _first_header(headers, HEADERS_CLIENT_KEY)
+        refresh_token = _first_header(headers, HEADERS_REFRESH_TOKEN)
 
         if not (client_key and refresh_token):
             await _json_response(400, {
                 "error": "missing tenant headers",
+                # Names every accepted spelling: a caller that guessed the wrong one
+                # should be able to see the right one in the rejection.
                 "detail": (
-                    f"{HEADER_CLIENT_KEY} and {HEADER_REFRESH_TOKEN} are required on "
-                    "every request"
+                    "one of " + " / ".join(HEADERS_CLIENT_KEY) + " and one of "
+                    + " / ".join(HEADERS_REFRESH_TOKEN) + " are required on every request"
                 ),
             })(scope, receive, send)
             return
@@ -165,7 +201,9 @@ class TenantFromHeaders:
         tenant = Tenant(
             client_key=client_key,
             refresh_token=refresh_token,
-            login_customer_id=headers.get(HEADER_LOGIN_CUSTOMER_ID, "").strip() or None,
+            login_customer_id=(
+                _first_header(headers, HEADERS_LOGIN_CUSTOMER_ID) or None
+            ),
         )
         # The token itself is never logged — only which client it belongs to.
         logger.debug("request for tenant %s", client_key)
