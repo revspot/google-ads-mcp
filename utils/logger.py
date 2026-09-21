@@ -204,12 +204,13 @@ class AuditLogger:
         self,
         customer_id: str,
         operation: str,
-        resource_type: str,
+        resource_type: Optional[str] = None,
         resource_id: Optional[str] = None,
         action: str = "read",
         user: Optional[str] = None,
         result: str = "success",
-        details: Optional[Dict[str, Any]] = None
+        details: Optional[Dict[str, Any]] = None,
+        **extra: Any
     ):
         """
         Log an API call for audit purposes.
@@ -223,6 +224,18 @@ class AuditLogger:
             user: Optional user identifier
             result: Result status (success, failure)
             details: Additional details
+            **extra: Anything else the caller wanted recorded, folded into details.
+
+        Deliberately forgiving about its own signature. 58 of the call sites in this
+        codebase disagree with it: none passes resource_type, and many pass names that
+        were never parameters — response, status, campaign_id, ad_group_id, entity_type.
+        Every one of those raised TypeError, and because the audit line comes AFTER the
+        Google Ads work, the call to Google succeeded and its result was then thrown away
+        by the logging of it. get_keyword_ideas was the one that surfaced it.
+
+        Fixing the signature rather than the 58 call sites: it is one change instead of
+        58, it cannot miss one, and it keeps the diff against upstream small enough to
+        rebase. Logging is bookkeeping — it should never be the reason a tool fails.
         """
         audit_data = {
             'timestamp': datetime.utcnow().isoformat(),
@@ -239,8 +252,14 @@ class AuditLogger:
         if user:
             audit_data['user'] = user
 
+        # Extra keywords are merged in rather than dropped: a call site passing
+        # status= or response= meant that to be part of the record, and the explicit
+        # `details` wins on a key collision because it is the documented argument.
+        merged = dict(extra)
         if details:
-            audit_data['details'] = details
+            merged.update(details)
+        if merged:
+            audit_data['details'] = merged
 
         # Log as INFO for successful operations, WARNING for failures
         if result == "success":
