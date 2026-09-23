@@ -492,6 +492,8 @@ _TOOL_MODULES = [
     ("shopping_pmax", "tools.shopping_pmax.mcp_tools_shopping_pmax", "register_shopping_pmax_tools"),
     ("extensions",    "tools.extensions.mcp_tools_extensions",       "register_extension_tools"),
     ("local_app",     "tools.local_app.mcp_tools_local_app",         "register_local_app_tools"),
+    ("assets",        "tools.assets.mcp_tools_assets",               "register_asset_tools"),
+    ("demand_gen",    "tools.demand_gen.mcp_tools_demand_gen",       "register_demand_gen_tools"),
 ]
 
 
