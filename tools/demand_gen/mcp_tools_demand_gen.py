@@ -82,8 +82,6 @@ def register_demand_gen_tools(mcp):
         status: str = "PAUSED",
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        location_ids: Optional[str] = None,
-        language_ids: Optional[str] = None,
     ) -> str:
         """
         Create a Demand Gen campaign, with its own daily budget.
@@ -98,15 +96,13 @@ def register_demand_gen_tools(mcp):
             status: PAUSED (default) or ENABLED
             start_date: YYYY-MM-DD. Defaults to tomorrow.
             end_date: YYYY-MM-DD. Optional.
-            location_ids: Comma-separated geo target constant IDs, e.g. "2356" for India
-            language_ids: Comma-separated language constant IDs, e.g. "1000" for English
 
         Returns:
             Campaign ID and resource name.
 
-        Locations and languages are campaign-level targeting in Google Ads, so they are
-        set here rather than on the ad group, whatever the brief says. Audiences are
-        ad-group level — pass those to google_ads_create_demand_gen_ad_group.
+        Locations, languages and audiences all go on the AD GROUP for Demand Gen, not
+        here — a Demand Gen campaign rejects criteria at campaign level. Pass them to
+        google_ads_create_demand_gen_ad_group.
 
         Created PAUSED by default. Enable it only once its ad group and ads exist and have
         been checked; an empty enabled campaign serves nothing but is live.
@@ -127,8 +123,6 @@ def register_demand_gen_tools(mcp):
                     status=status,
                     start_date=start_date,
                     end_date=end_date,
-                    location_ids=_ids(location_ids),
-                    language_ids=_ids(language_ids),
                 )
 
                 audit_logger.log_api_call(
@@ -149,10 +143,6 @@ def register_demand_gen_tools(mcp):
                 output += f"- **Daily budget**: {result['daily_budget']}\n"
                 output += f"- **Starts**: {result['start_date']}"
                 output += f" — ends {result['end_date']}\n" if result["end_date"] else "\n"
-                if result["locations"]:
-                    output += f"- **Locations**: {', '.join(result['locations'])}\n"
-                if result["languages"]:
-                    output += f"- **Languages**: {', '.join(result['languages'])}\n"
                 output += "\nNext: create an ad group with "
                 output += "`google_ads_create_demand_gen_ad_group`.\n"
                 return output
@@ -170,6 +160,8 @@ def register_demand_gen_tools(mcp):
         name: str,
         status: str = "PAUSED",
         audience_ids: Optional[str] = None,
+        location_ids: Optional[str] = None,
+        language_ids: Optional[str] = None,
     ) -> str:
         """
         Create an ad group in a Demand Gen campaign.
@@ -181,12 +173,15 @@ def register_demand_gen_tools(mcp):
             status: PAUSED (default) or ENABLED
             audience_ids: Comma-separated user list IDs to target. Get them from
                 google_ads_list_user_lists.
+            location_ids: Comma-separated geo target constant IDs, e.g. "2356" for India
+            language_ids: Comma-separated language constant IDs, e.g. "1000" for English
 
         Returns:
             Ad group ID and resource name.
 
-        Locations and languages are not set here — they belong to the campaign. See
-        google_ads_create_demand_gen_campaign.
+        Locations and languages are set HERE, not on the campaign: a Demand Gen campaign
+        rejects criteria at campaign level, and the same criteria on the ad group are
+        accepted.
         """
         with performance_logger.track_operation(
             "create_demand_gen_ad_group", customer_id=customer_id
@@ -201,6 +196,8 @@ def register_demand_gen_tools(mcp):
                     name=name,
                     status=status,
                     audience_ids=_ids(audience_ids),
+                    location_ids=_ids(location_ids),
+                    language_ids=_ids(language_ids),
                 )
 
                 audit_logger.log_api_call(
@@ -217,8 +214,9 @@ def register_demand_gen_tools(mcp):
                 output += f"- **Resource name**: `{result['ad_group_resource_name']}`\n"
                 output += f"- **Name**: {result['name']}\n"
                 output += f"- **Status**: {result['status']}\n"
-                if result["audiences"]:
-                    output += f"- **Audiences**: {', '.join(result['audiences'])}\n"
+                for label in ("locations", "languages", "audiences"):
+                    if result.get(label):
+                        output += f"- **{label.title()}**: {', '.join(result[label])}\n"
                 output += "\nNext: upload images with `google_ads_upload_image_asset`, "
                 output += "then create the ad with `google_ads_create_demand_gen_ad`.\n"
                 return output
@@ -265,8 +263,11 @@ def register_demand_gen_tools(mcp):
             marketing_image_resource_names: Landscape 1.91:1 image assets (JSON array or comma-separated)
             square_image_resource_names: Square 1:1 image assets (JSON array or comma-separated)
             portrait_image_resource_names: Portrait 4:5 image assets (JSON array or comma-separated)
-            call_to_action: One of LEARN_MORE, SHOP_NOW, SIGN_UP, BOOK_NOW, GET_QUOTE,
-                SUBSCRIBE, DOWNLOAD, ORDER_NOW, CONTACT_US, APPLY_NOW, VISIT_SITE, SEE_MORE
+            call_to_action: The button's DISPLAY TEXT, e.g. "Learn more", "Shop now",
+                "Sign up", "Book now", "Get quote", "Subscribe", "Download", "Order now",
+                "Contact us", "Apply now", "Visit site", "See more". Not the enum name —
+                call_to_action_text is a text field, and "LEARN_MORE" is rejected as
+                "Invalid call to action text".
             status: PAUSED (default) or ENABLED
             ad_name: Optional name for the ad
 

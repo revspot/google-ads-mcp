@@ -69,14 +69,15 @@ class DemandGenManager:
         status: str = "PAUSED",
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        location_ids: Optional[List[str]] = None,
-        language_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Create a Demand Gen campaign and the budget it owns.
 
-        Locations and languages are set here, not on the ad group: in Google Ads they are
-        campaign criteria, whatever level the brief describes them at. Audiences are the
-        ad-group-level targeting and belong on create_ad_group.
+        Locations and languages are NOT set here. They are campaign criteria on Search and
+        on most other channel types, but a Demand Gen campaign rejects them at campaign
+        level — every location and language criterion comes back as an error code the v25
+        library cannot even name ("The error code is not in this version", request_error:
+        UNKNOWN, on operations.create.location). The same criteria applied to the ad group
+        succeed. So they live on create_ad_group, along with audiences.
         """
         customer_id = str(customer_id).replace("-", "")
         strategy = _normalise_bidding(bidding_strategy)
@@ -154,12 +155,8 @@ class DemandGenManager:
             customer_id=customer_id, operations=[operation]
         )
         campaign_resource_name = response.results[0].resource_name
-        campaign_id = campaign_resource_name.rsplit("~", 1)[-1]
+        campaign_id = campaign_resource_name.rsplit("/", 1)[-1]
         logger.info(f"Created Demand Gen campaign {campaign_resource_name}")
-
-        criteria = self._add_campaign_criteria(
-            customer_id, campaign_resource_name, location_ids, language_ids
-        )
 
         return {
             "campaign_id": campaign_id,
@@ -171,39 +168,53 @@ class DemandGenManager:
             "daily_budget": daily_budget,
             "start_date": campaign.start_date_time,
             "end_date": end_date,
-            **criteria,
         }
 
-    def _add_campaign_criteria(
+    def _add_ad_group_criteria(
         self,
         customer_id: str,
-        campaign_resource_name: str,
+        ad_group_resource_name: str,
         location_ids: Optional[List[str]],
         language_ids: Optional[List[str]],
+        audience_ids: Optional[List[str]],
     ) -> Dict[str, Any]:
-        """Attach location and language targeting to a campaign."""
-        if not location_ids and not language_ids:
-            return {"locations": [], "languages": []}
+        """Attach location, language and audience targeting to a Demand Gen ad group."""
+        if not any([location_ids, language_ids, audience_ids]):
+            return {"locations": [], "languages": [], "audiences": []}
 
-        service = self.client.get_service("CampaignCriterionService")
+        service = self.client.get_service("AdGroupCriterionService")
+        user_list_service = self.client.get_service("UserListService")
         operations = []
+
+        def _new():
+            operation = self.client.get_type("AdGroupCriterionOperation")
+            operation.create.ad_group = ad_group_resource_name
+            return operation
+
         for location_id in location_ids or []:
-            operation = self.client.get_type("CampaignCriterionOperation")
-            criterion = operation.create
-            criterion.campaign = campaign_resource_name
-            criterion.location.geo_target_constant = f"geoTargetConstants/{location_id}"
+            operation = _new()
+            operation.create.location.geo_target_constant = (
+                f"geoTargetConstants/{location_id}"
+            )
             operations.append(operation)
         for language_id in language_ids or []:
-            operation = self.client.get_type("CampaignCriterionOperation")
-            criterion = operation.create
-            criterion.campaign = campaign_resource_name
-            criterion.language.language_constant = f"languageConstants/{language_id}"
+            operation = _new()
+            operation.create.language.language_constant = (
+                f"languageConstants/{language_id}"
+            )
+            operations.append(operation)
+        for audience_id in audience_ids or []:
+            operation = _new()
+            operation.create.user_list.user_list = user_list_service.user_list_path(
+                customer_id, audience_id
+            )
             operations.append(operation)
 
-        service.mutate_campaign_criteria(customer_id=customer_id, operations=operations)
+        service.mutate_ad_group_criteria(customer_id=customer_id, operations=operations)
         return {
-            "locations": list(location_ids or []),
-            "languages": list(language_ids or []),
+            "locations": [str(x) for x in (location_ids or [])],
+            "languages": [str(x) for x in (language_ids or [])],
+            "audiences": [str(x) for x in (audience_ids or [])],
         }
 
     # ------------------------------------------------------------------
@@ -217,11 +228,14 @@ class DemandGenManager:
         name: str,
         status: str = "PAUSED",
         audience_ids: Optional[List[str]] = None,
+        location_ids: Optional[List[str]] = None,
+        language_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Create a Demand Gen ad group, optionally targeted at user lists.
+        """Create a Demand Gen ad group and its targeting.
 
-        audience_ids are user list ids — the account's own remarketing and customer-match
-        lists, as google_ads_list_user_lists reports them.
+        Locations and languages are here rather than on the campaign because that is where
+        a Demand Gen campaign accepts them — see create_campaign. audience_ids are user
+        list ids, as google_ads_list_user_lists reports them.
         """
         customer_id = str(customer_id).replace("-", "")
         ad_group_service = self.client.get_service("AdGroupService")
@@ -239,26 +253,12 @@ class DemandGenManager:
             customer_id=customer_id, operations=[operation]
         )
         ad_group_resource_name = response.results[0].resource_name
-        ad_group_id = ad_group_resource_name.rsplit("~", 1)[-1]
+        ad_group_id = ad_group_resource_name.rsplit("/", 1)[-1]
         logger.info(f"Created Demand Gen ad group {ad_group_resource_name}")
 
-        attached = []
-        if audience_ids:
-            criterion_service = self.client.get_service("AdGroupCriterionService")
-            user_list_service = self.client.get_service("UserListService")
-            operations = []
-            for audience_id in audience_ids:
-                criterion_operation = self.client.get_type("AdGroupCriterionOperation")
-                criterion = criterion_operation.create
-                criterion.ad_group = ad_group_resource_name
-                criterion.user_list.user_list = user_list_service.user_list_path(
-                    customer_id, audience_id
-                )
-                operations.append(criterion_operation)
-                attached.append(str(audience_id))
-            criterion_service.mutate_ad_group_criteria(
-                customer_id=customer_id, operations=operations
-            )
+        targeting = self._add_ad_group_criteria(
+            customer_id, ad_group_resource_name, location_ids, language_ids, audience_ids
+        )
 
         return {
             "ad_group_id": ad_group_id,
@@ -266,7 +266,7 @@ class DemandGenManager:
             "campaign_id": str(campaign_id),
             "name": name,
             "status": (status or "PAUSED").upper(),
-            "audiences": attached,
+            **targeting,
         }
 
     # ------------------------------------------------------------------
