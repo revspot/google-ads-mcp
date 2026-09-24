@@ -99,6 +99,19 @@ class LanguageTarget:
     language_constant_id: str  # Language constant ID
 
 
+def _as_datetime(value: str, end_of_day: bool) -> str:
+    """A YYYY-MM-DD date as the "yyyy-MM-dd HH:mm:ss" the API wants.
+
+    Passed through unchanged if it already carries a time.
+    """
+    value = (value or "").strip()
+    if not value:
+        raise ValueError("date is empty")
+    if " " in value or "T" in value:
+        return value.replace("T", " ")
+    return f"{value} 23:59:59" if end_of_day else f"{value} 00:00:00"
+
+
 class CampaignManager:
     """
     Manages Google Ads campaigns.
@@ -205,11 +218,14 @@ class CampaignManager:
         # Bidding strategy
         self._set_bidding_strategy(campaign, config)
 
-        # Start and end dates
+        # Start and end dates. start_date_time / end_date_time, not start_date / end_date:
+        # v25 renamed both, and proto-plus raises AttributeError on the old names rather
+        # than ignoring them. This crashed any Search campaign create that passed a date —
+        # invisible until now only because callers were leaving them unset.
         if config.start_date:
-            campaign.start_date = config.start_date
+            campaign.start_date_time = _as_datetime(config.start_date, end_of_day=False)
         if config.end_date:
-            campaign.end_date = config.end_date
+            campaign.end_date_time = _as_datetime(config.end_date, end_of_day=True)
 
         # EU political advertising compliance (required by API v18+)
         campaign.contains_eu_political_advertising = (
@@ -264,6 +280,7 @@ class CampaignManager:
             campaign.target_roas.target_roas = config.target_roas or 1.0
 
         elif config.bidding_strategy_type == BiddingStrategyType.TARGET_SPEND:
+            # Assignment, not CopyFrom — proto-plus messages have no such method.
             campaign.target_spend = self.client.get_type("TargetSpend")
 
     def update_campaign(
@@ -302,12 +319,14 @@ class CampaignManager:
             field_mask.append("status")
 
         if "start_date" in updates:
-            campaign.start_date = updates["start_date"]
-            field_mask.append("start_date")
+            campaign.start_date_time = _as_datetime(updates["start_date"], end_of_day=False)
+            # The field mask names the PROTO field, which v25 renamed along with the
+            # attribute; "start_date" here would mask a field that no longer exists.
+            field_mask.append("start_date_time")
 
         if "end_date" in updates:
-            campaign.end_date = updates["end_date"]
-            field_mask.append("end_date")
+            campaign.end_date_time = _as_datetime(updates["end_date"], end_of_day=True)
+            field_mask.append("end_date_time")
 
         if "final_url_suffix" in updates:
             campaign.final_url_suffix = updates["final_url_suffix"]
@@ -600,8 +619,8 @@ class CampaignManager:
                 campaign.status,
                 campaign.advertising_channel_type,
                 campaign.campaign_budget,
-                campaign.start_date,
-                campaign.end_date,
+                campaign.start_date_time,
+                campaign.end_date_time,
                 campaign.bidding_strategy_type,
                 campaign.network_settings.target_google_search,
                 campaign.network_settings.target_search_network,
@@ -626,8 +645,8 @@ class CampaignManager:
                 "status": row.campaign.status.name,
                 "type": row.campaign.advertising_channel_type.name,
                 "budget": row.campaign.campaign_budget,
-                "start_date": row.campaign.start_date,
-                "end_date": row.campaign.end_date,
+                "start_date": row.campaign.start_date_time,
+                "end_date": row.campaign.end_date_time,
                 "bidding_strategy": row.campaign.bidding_strategy_type.name,
                 "network_settings": {
                     "google_search": row.campaign.network_settings.target_google_search,

@@ -12,6 +12,7 @@ Everything here is created PAUSED unless the caller says otherwise. These object
 money once enabled and the server holds one credential shared by every caller.
 """
 
+import json
 from typing import List, Optional
 
 from managers.demand_gen_manager import DemandGenManager
@@ -24,11 +25,48 @@ performance_logger = get_performance_logger()
 audit_logger = get_audit_logger()
 
 
-def _split(value: Optional[str]) -> Optional[List[str]]:
-    """A comma-separated argument as a list, or None."""
-    if not value:
+def _ids(value: Optional[str]) -> Optional[List[str]]:
+    """A list of identifiers, given as a JSON array or comma-separated.
+
+    Safe to split on commas because none of the things this parses — numeric IDs and
+    asset resource names — can contain one.
+    """
+    return _parse_list(value)
+
+
+def _copy(value: Optional[str], field: str) -> Optional[List[str]]:
+    """A list of ad copy, given as a JSON array or as a single string.
+
+    NOT comma-separated. Ad copy contains commas as a matter of course — "One Agent, Full
+    Funnel" is one headline, not two — and splitting on them silently cuts approved copy
+    into fragments and can push the result past the five-headline limit. A plain string is
+    therefore taken as ONE item; several items must come as a JSON array, which is also
+    what create_asset_group already expects.
+    """
+    if value is None:
         return None
-    return [item.strip() for item in value.split(",") if item.strip()]
+    parsed = _parse_list(value, split_on_commas=False)
+    return parsed
+
+
+def _parse_list(value: Optional[str], split_on_commas: bool = True) -> Optional[List[str]]:
+    """JSON array if it looks like one, else a delimited or single value."""
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"looks like a JSON array but will not parse: {exc}") from exc
+        if not isinstance(parsed, list):
+            raise ValueError("expected a JSON array")
+        return [str(item).strip() for item in parsed if str(item).strip()]
+    if split_on_commas:
+        return [item.strip() for item in text.split(",") if item.strip()]
+    return [text]
 
 
 def register_demand_gen_tools(mcp):
@@ -89,8 +127,8 @@ def register_demand_gen_tools(mcp):
                     status=status,
                     start_date=start_date,
                     end_date=end_date,
-                    location_ids=_split(location_ids),
-                    language_ids=_split(language_ids),
+                    location_ids=_ids(location_ids),
+                    language_ids=_ids(language_ids),
                 )
 
                 audit_logger.log_api_call(
@@ -162,7 +200,7 @@ def register_demand_gen_tools(mcp):
                     campaign_id=campaign_id,
                     name=name,
                     status=status,
-                    audience_ids=_split(audience_ids),
+                    audience_ids=_ids(audience_ids),
                 )
 
                 audit_logger.log_api_call(
@@ -214,14 +252,19 @@ def register_demand_gen_tools(mcp):
             customer_id: Customer ID (without hyphens)
             ad_group_id: The Demand Gen ad group's ID
             final_url: Landing page URL
-            headlines: Comma-separated headlines, up to 5, each at most 40 characters
-            descriptions: Comma-separated descriptions, up to 5, each at most 90 characters
+            headlines: JSON array of up to 5 headlines, each at most 40 characters,
+                e.g. '["One Agent, Full Funnel", "Book more meetings"]'. A plain
+                string is taken as ONE headline — commas are not separators here,
+                because ad copy contains them.
+            descriptions: JSON array of up to 5 descriptions, each at most 90
+                characters. Same rule: a plain string is one description.
             business_name: Advertiser name, at most 25 characters
-            logo_asset_resource_names: Comma-separated logo image asset resource names
+            logo_asset_resource_names: Logo image asset resource names, as a JSON
+                array or comma-separated
                 (1:1, at least 128x128). At least one is required.
-            marketing_image_resource_names: Comma-separated landscape 1.91:1 image assets
-            square_image_resource_names: Comma-separated square 1:1 image assets
-            portrait_image_resource_names: Comma-separated portrait 4:5 image assets
+            marketing_image_resource_names: Landscape 1.91:1 image assets (JSON array or comma-separated)
+            square_image_resource_names: Square 1:1 image assets (JSON array or comma-separated)
+            portrait_image_resource_names: Portrait 4:5 image assets (JSON array or comma-separated)
             call_to_action: One of LEARN_MORE, SHOP_NOW, SIGN_UP, BOOK_NOW, GET_QUOTE,
                 SUBSCRIBE, DOWNLOAD, ORDER_NOW, CONTACT_US, APPLY_NOW, VISIT_SITE, SEE_MORE
             status: PAUSED (default) or ENABLED
@@ -249,13 +292,13 @@ def register_demand_gen_tools(mcp):
                     customer_id=customer_id,
                     ad_group_id=ad_group_id,
                     final_url=final_url,
-                    headlines=_split(headlines) or [],
-                    descriptions=_split(descriptions) or [],
+                    headlines=_copy(headlines, "headlines") or [],
+                    descriptions=_copy(descriptions, "descriptions") or [],
                     business_name=business_name,
-                    logo_asset_resource_names=_split(logo_asset_resource_names) or [],
-                    marketing_image_resource_names=_split(marketing_image_resource_names),
-                    square_image_resource_names=_split(square_image_resource_names),
-                    portrait_image_resource_names=_split(portrait_image_resource_names),
+                    logo_asset_resource_names=_ids(logo_asset_resource_names) or [],
+                    marketing_image_resource_names=_ids(marketing_image_resource_names),
+                    square_image_resource_names=_ids(square_image_resource_names),
+                    portrait_image_resource_names=_ids(portrait_image_resource_names),
                     call_to_action=call_to_action,
                     status=status,
                     ad_name=ad_name,

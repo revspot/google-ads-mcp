@@ -55,9 +55,21 @@ class PerformanceMaxCampaignConfig:
     """Configuration for Performance Max campaign creation."""
     name: str
     budget_amount: float
-    conversion_goals: List[str]
+    # Conversion action IDs or resource names, NOT display names. An account may hold
+    # several conversion actions sharing a name — Revspot Autospot has four called
+    # "Submit lead form" — so a name does not identify one. This field was previously
+    # typed as names and, worse, never read at all: the tool required it, the manager
+    # ignored it, and the campaign optimised for the account default while the caller
+    # believed otherwise.
+    conversion_action_ids: Optional[List[str]] = None
     target_roas: Optional[float] = None
     target_cpa: Optional[float] = None
+    status: str = "PAUSED"
+    location_ids: Optional[List[str]] = None
+    language_ids: Optional[List[str]] = None
+    # Final URL expansion sends traffic to pages Google picks rather than the one given.
+    # On by default in PMax, so opting out has to be possible for approved landing pages.
+    opt_out_final_url_expansion: bool = False
 
 
 class ShoppingPMaxManager:
@@ -183,12 +195,12 @@ class ShoppingPMaxManager:
         if product_condition:
             dimension = self.client.get_type("ListingDimensionInfo")
             dimension.product_condition.condition = self.client.enums.ProductConditionEnum[product_condition]
-            criterion.listing_group.case_value.product_condition.CopyFrom(dimension.product_condition)
+            self.client.copy_from(criterion.listing_group.case_value.product_condition, dimension.product_condition)
 
         if product_type:
             dimension = self.client.get_type("ListingDimensionInfo")
             dimension.product_type.value = product_type
-            criterion.listing_group.case_value.product_type.CopyFrom(dimension.product_type)
+            self.client.copy_from(criterion.listing_group.case_value.product_type, dimension.product_type)
 
         # Set CPC bid for units (not subdivisions)
         if not is_subdivision:
@@ -348,7 +360,9 @@ class ShoppingPMaxManager:
 
         campaign.name = config.name
         campaign.advertising_channel_type = self.client.enums.AdvertisingChannelTypeEnum.PERFORMANCE_MAX
-        campaign.status = self.client.enums.CampaignStatusEnum.PAUSED
+        campaign.status = getattr(
+            self.client.enums.CampaignStatusEnum, (config.status or "PAUSED").upper()
+        )
         campaign.campaign_budget = budget_resource_name
 
         # Bidding strategy
@@ -359,20 +373,96 @@ class ShoppingPMaxManager:
         else:
             campaign.maximize_conversions.target_cpa_micros = 0
 
+        # Required on every campaign create since v18; missing here while Search campaigns
+        # have carried it since they were written (campaign_manager.py:215).
+        campaign.contains_eu_political_advertising = (
+            self.client.enums.EuPoliticalAdvertisingStatusEnum
+            .DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
+        )
+
+        # Optimise for the conversion actions the caller named, by ID or resource name.
+        if config.conversion_action_ids:
+            conversion_action_service = self.client.get_service("ConversionActionService")
+            for identifier in config.conversion_action_ids:
+                identifier = str(identifier).strip()
+                resource_name = (
+                    identifier
+                    if identifier.startswith("customers/")
+                    else conversion_action_service.conversion_action_path(
+                        customer_id, identifier
+                    )
+                )
+                campaign.selective_optimization.conversion_actions.append(resource_name)
+
+        # url_expansion_opt_out no longer exists on Campaign — in v25 the control is an
+        # asset automation setting, so opting out means opting OUT of the automation.
+        if config.opt_out_final_url_expansion:
+            setting = self.client.get_type("AssetAutomationSetting")
+            setting.asset_automation_type = (
+                self.client.enums.AssetAutomationTypeEnum
+                .FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION
+            )
+            setting.asset_automation_status = (
+                self.client.enums.AssetAutomationStatusEnum.OPTED_OUT
+            )
+            campaign.asset_automation_settings.append(setting)
+
         # Create campaign
         response = campaign_service.mutate_campaigns(
             customer_id=customer_id,
             operations=[campaign_operation]
         )
 
-        campaign_id = response.results[0].resource_name.split('/')[-1]
+        campaign_resource_name = response.results[0].resource_name
+        campaign_id = campaign_resource_name.split('/')[-1]
+
+        # Locations and languages are campaign criteria, added after the campaign exists.
+        criteria = self._add_campaign_criteria(
+            customer_id, campaign_resource_name, config.location_ids, config.language_ids
+        )
 
         return {
             'campaign_id': campaign_id,
             'campaign_name': config.name,
-            'resource_name': response.results[0].resource_name,
+            'resource_name': campaign_resource_name,
             'budget': config.budget_amount,
-            'bidding_strategy': 'TARGET_ROAS' if config.target_roas else 'MAXIMIZE_CONVERSIONS'
+            'status': (config.status or 'PAUSED').upper(),
+            'bidding_strategy': 'TARGET_ROAS' if config.target_roas else 'MAXIMIZE_CONVERSIONS',
+            'conversion_actions': list(config.conversion_action_ids or []),
+            'final_url_expansion': not config.opt_out_final_url_expansion,
+            **criteria,
+        }
+
+    def _add_campaign_criteria(
+        self,
+        customer_id: str,
+        campaign_resource_name: str,
+        location_ids: Optional[List[str]],
+        language_ids: Optional[List[str]]
+    ) -> Dict[str, Any]:
+        """Attach location and language targeting to a campaign."""
+        if not location_ids and not language_ids:
+            return {'locations': [], 'languages': []}
+
+        service = self.client.get_service("CampaignCriterionService")
+        operations = []
+        for location_id in location_ids or []:
+            operation = self.client.get_type("CampaignCriterionOperation")
+            criterion = operation.create
+            criterion.campaign = campaign_resource_name
+            criterion.location.geo_target_constant = f"geoTargetConstants/{location_id}"
+            operations.append(operation)
+        for language_id in language_ids or []:
+            operation = self.client.get_type("CampaignCriterionOperation")
+            criterion = operation.create
+            criterion.campaign = campaign_resource_name
+            criterion.language.language_constant = f"languageConstants/{language_id}"
+            operations.append(operation)
+
+        service.mutate_campaign_criteria(customer_id=customer_id, operations=operations)
+        return {
+            'locations': list(location_ids or []),
+            'languages': list(language_ids or []),
         }
 
     def create_asset_group(

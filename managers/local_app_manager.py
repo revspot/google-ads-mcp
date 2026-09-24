@@ -113,7 +113,7 @@ class LocalAppManager:
         )
 
         # Bidding strategy - maximize conversions for local actions
-        campaign.maximize_conversions.CopyFrom(self.client.get_type("MaximizeConversions"))
+        self.client.copy_from(campaign.maximize_conversions, self.client.get_type("MaximizeConversions"))
 
         # Create campaign
         response = campaign_service.mutate_campaigns(
@@ -312,16 +312,16 @@ class LocalAppManager:
             if config.target_cpa:
                 campaign.target_cpa.target_cpa_micros = int(config.target_cpa * 1_000_000)
             else:
-                campaign.maximize_conversions.CopyFrom(self.client.get_type("MaximizeConversions"))
+                self.client.copy_from(campaign.maximize_conversions, self.client.get_type("MaximizeConversions"))
         elif "TARGET_CONVERSION_COST" in config.bidding_strategy_goal_type.value:
             if config.target_cpa:
                 campaign.target_cpa.target_cpa_micros = int(config.target_cpa * 1_000_000)
             else:
-                campaign.maximize_conversions.CopyFrom(self.client.get_type("MaximizeConversions"))
+                self.client.copy_from(campaign.maximize_conversions, self.client.get_type("MaximizeConversions"))
         elif config.bidding_strategy_goal_type.value == "OPTIMIZE_RETURN_ON_ADVERTISING_SPEND":
-            campaign.maximize_conversion_value.CopyFrom(self.client.get_type("MaximizeConversionValue"))
+            self.client.copy_from(campaign.maximize_conversion_value, self.client.get_type("MaximizeConversionValue"))
         else:
-            campaign.maximize_conversions.CopyFrom(self.client.get_type("MaximizeConversions"))
+            self.client.copy_from(campaign.maximize_conversions, self.client.get_type("MaximizeConversions"))
 
         # Create campaign
         response = campaign_service.mutate_campaigns(

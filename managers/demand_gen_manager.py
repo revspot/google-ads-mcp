@@ -18,7 +18,21 @@ logger = get_logger(__name__)
 
 # What Demand Gen accepts. Named here rather than passed through so an unsupported
 # strategy fails with a list of the real options instead of a Google error code.
+#
+# TARGET_SPEND and MAXIMIZE_CLICKS are the same strategy under two names — the Google Ads
+# API calls the field target_spend, the UI calls it Maximize Clicks, and the Search tools
+# in this codebase take the first while these took the second. Both are accepted
+# everywhere so a caller moving between campaign types does not have to know which
+# vocabulary a given tool was written against.
+_ALIASES = {"TARGET_SPEND": "MAXIMIZE_CLICKS", "MAXIMISE_CLICKS": "MAXIMIZE_CLICKS",
+            "MAXIMISE_CONVERSIONS": "MAXIMIZE_CONVERSIONS"}
 BIDDING_STRATEGIES = ("MAXIMIZE_CONVERSIONS", "MAXIMIZE_CLICKS", "TARGET_CPA")
+
+
+def _normalise_bidding(value: str) -> str:
+    """The canonical name for a bidding strategy the caller asked for."""
+    name = (value or "").strip().upper()
+    return _ALIASES.get(name, name)
 
 
 def _as_datetime(value: str, end_of_day: bool) -> str:
@@ -65,10 +79,11 @@ class DemandGenManager:
         ad-group-level targeting and belong on create_ad_group.
         """
         customer_id = str(customer_id).replace("-", "")
-        strategy = (bidding_strategy or "").upper()
+        strategy = _normalise_bidding(bidding_strategy)
         if strategy not in BIDDING_STRATEGIES:
             raise ValueError(
-                f"bidding_strategy must be one of {', '.join(BIDDING_STRATEGIES)}"
+                f"bidding_strategy must be one of {', '.join(BIDDING_STRATEGIES)} "
+                "(TARGET_SPEND is accepted as an alias for MAXIMIZE_CLICKS)"
             )
         if strategy == "TARGET_CPA" and not target_cpa:
             raise ValueError("target_cpa is required when bidding_strategy is TARGET_CPA")
@@ -107,9 +122,12 @@ class DemandGenManager:
                 int(round(target_cpa * 1_000_000)) if target_cpa else 0
             )
         elif strategy == "MAXIMIZE_CLICKS":
-            # The field exists to cap CPC; left unset it means "no ceiling", which is the
-            # right default for a campaign that starts paused.
-            campaign.target_spend.CopyFrom(self.client.get_type("TargetSpend"))
+            # Assignment, not CopyFrom: these are proto-plus messages and have no such
+            # method — calling it raises "Unknown field for TargetSpend: CopyFrom" and
+            # took Maximize Clicks down entirely. campaign_manager.py:267 had the right
+            # form already. An empty TargetSpend selects the strategy with no CPC ceiling,
+            # which is the right default for a campaign that starts paused.
+            campaign.target_spend = self.client.get_type("TargetSpend")
         else:  # TARGET_CPA
             campaign.target_cpa.target_cpa_micros = int(round(target_cpa * 1_000_000))
 
@@ -122,6 +140,15 @@ class DemandGenManager:
         )
         if end_date:
             campaign.end_date_time = _as_datetime(end_date, end_of_day=True)
+
+        # Required on every campaign create since v18 — without it the API rejects the
+        # whole request with "required field was not present". campaign_manager.py:215
+        # has carried this since Search campaigns were written; these did not, which is
+        # why no Demand Gen campaign could be created at all.
+        campaign.contains_eu_political_advertising = (
+            self.client.enums.EuPoliticalAdvertisingStatusEnum
+            .DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
+        )
 
         response = campaign_service.mutate_campaigns(
             customer_id=customer_id, operations=[operation]

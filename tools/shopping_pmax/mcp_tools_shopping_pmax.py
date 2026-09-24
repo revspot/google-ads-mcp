@@ -369,9 +369,14 @@ def register_shopping_pmax_tools(mcp):
         customer_id: str,
         campaign_name: str,
         budget_amount: float,
-        conversion_goals_json: str,
+        conversion_action_ids_json: Optional[str] = None,
         target_roas: Optional[float] = None,
-        target_cpa: Optional[float] = None
+        target_cpa: Optional[float] = None,
+        status: str = "PAUSED",
+        location_ids: Optional[str] = None,
+        language_ids: Optional[str] = None,
+        opt_out_final_url_expansion: bool = False,
+        conversion_goals_json: Optional[str] = None
     ) -> str:
         """Create a Performance Max campaign.
 
@@ -382,17 +387,32 @@ def register_shopping_pmax_tools(mcp):
             customer_id: Google Ads customer ID (10 digits, no hyphens)
             campaign_name: Name for the Performance Max campaign
             budget_amount: Daily budget in currency units
-            conversion_goals_json: JSON array of conversion action names
+            conversion_action_ids_json: JSON array of conversion action IDs or resource
+                names to optimise for, e.g. '["123456789"]'. IDs, not display names — an
+                account can hold several conversion actions with the same name, so a name
+                identifies nothing. Get them from google_ads_list_conversion_actions.
             target_roas: Optional target return on ad spend (e.g., 3.0 for 300%)
             target_cpa: Optional target cost per acquisition (if not using ROAS)
+            status: PAUSED (default) or ENABLED
+            location_ids: Comma-separated geo target constant IDs, e.g. "2356"
+            language_ids: Comma-separated language constant IDs, e.g. "1000"
+            opt_out_final_url_expansion: True to send traffic only to the final URLs given,
+                instead of letting Google pick other pages on the site. Expansion is ON by
+                default in Performance Max.
+            conversion_goals_json: Deprecated name for conversion_action_ids_json, kept so
+                existing callers do not break. It was documented as accepting conversion
+                action NAMES and was never read at all — the campaign optimised for the
+                account default while the caller believed it had chosen.
 
         Example:
             google_ads_create_performance_max_campaign(
                 customer_id="1234567890",
                 campaign_name="PMax - All Products",
                 budget_amount=150.00,
-                conversion_goals_json='["Purchase", "Add to Cart"]',
-                target_roas=4.0
+                conversion_action_ids_json='["123456789"]',
+                target_roas=4.0,
+                location_ids="2356",
+                opt_out_final_url_expansion=True
             )
         """
         with performance_logger.track_operation('create_performance_max', customer_id=customer_id):
@@ -400,18 +420,37 @@ def register_shopping_pmax_tools(mcp):
                 client = get_auth_manager().get_client()
                 shopping_manager = ShoppingPMaxManager(client)
 
-                # Parse conversion goals
-                try:
-                    conversion_goals = json.loads(conversion_goals_json)
-                except json.JSONDecodeError:
-                    return "❌ Invalid JSON format for conversion_goals_json"
+                raw_ids = conversion_action_ids_json or conversion_goals_json
+                conversion_action_ids = None
+                if raw_ids:
+                    try:
+                        conversion_action_ids = json.loads(raw_ids)
+                    except json.JSONDecodeError:
+                        return "❌ Invalid JSON format for conversion_action_ids_json"
+                    if not isinstance(conversion_action_ids, list):
+                        return "❌ conversion_action_ids_json must be a JSON array"
+                    # A display name slipped in where an ID belongs is worth catching here:
+                    # the API would accept the resource path it builds and then fail
+                    # obscurely, or worse, silently optimise for nothing.
+                    for item in conversion_action_ids:
+                        text = str(item).strip()
+                        if not text.startswith("customers/") and not text.isdigit():
+                            return (
+                                f"❌ {text!r} is not a conversion action ID. Pass IDs or "
+                                "resource names, not display names — several actions can "
+                                "share a name. See google_ads_list_conversion_actions."
+                            )
 
                 config = PerformanceMaxCampaignConfig(
                     name=campaign_name,
                     budget_amount=budget_amount,
-                    conversion_goals=conversion_goals,
+                    conversion_action_ids=[str(i).strip() for i in (conversion_action_ids or [])],
                     target_roas=target_roas,
-                    target_cpa=target_cpa
+                    target_cpa=target_cpa,
+                    status=status,
+                    location_ids=[x.strip() for x in (location_ids or "").split(",") if x.strip()],
+                    language_ids=[x.strip() for x in (language_ids or "").split(",") if x.strip()],
+                    opt_out_final_url_expansion=opt_out_final_url_expansion
                 )
 
                 result = shopping_manager.create_performance_max_campaign(customer_id, config)
