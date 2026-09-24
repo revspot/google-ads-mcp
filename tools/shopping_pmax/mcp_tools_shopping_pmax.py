@@ -17,7 +17,7 @@ Performance Max Tools:
 9. google_ads_pmax_insights - Performance Max insights
 """
 
-from typing import List, Optional
+from typing import List, Optional, Union
 from managers.shopping_pmax_manager import (
     ShoppingPMaxManager,
     ShoppingCampaignConfig,
@@ -32,6 +32,24 @@ import json
 logger = get_logger(__name__)
 performance_logger = get_performance_logger()
 audit_logger = get_audit_logger()
+
+
+
+def _as_list(value):
+    """Comma-separated string, JSON array, or an actual list — all to a list of strings."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    text = str(value).strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            return [str(v).strip() for v in json.loads(text) if str(v).strip()]
+        except json.JSONDecodeError:
+            pass
+    return [v.strip() for v in text.split(",") if v.strip()]
 
 
 def register_shopping_pmax_tools(mcp):
@@ -369,14 +387,16 @@ def register_shopping_pmax_tools(mcp):
         customer_id: str,
         campaign_name: str,
         budget_amount: float,
-        conversion_action_ids_json: Optional[str] = None,
+        conversion_action_ids_json: Optional[Union[str, List[str]]] = None,
         target_roas: Optional[float] = None,
         target_cpa: Optional[float] = None,
         status: str = "PAUSED",
-        location_ids: Optional[str] = None,
-        language_ids: Optional[str] = None,
+        location_ids: Optional[Union[str, List[str]]] = None,
+        language_ids: Optional[Union[str, List[str]]] = None,
         opt_out_final_url_expansion: bool = False,
-        conversion_goals_json: Optional[str] = None
+        business_name_asset: Optional[str] = None,
+        logo_assets: Optional[Union[str, List[str]]] = None,
+        conversion_goals_json: Optional[Union[str, List[str]]] = None
     ) -> str:
         """Create a Performance Max campaign.
 
@@ -399,6 +419,11 @@ def register_shopping_pmax_tools(mcp):
             opt_out_final_url_expansion: True to send traffic only to the final URLs given,
                 instead of letting Google pick other pages on the site. Expansion is ON by
                 default in Performance Max.
+            business_name_asset: Resource name of a TEXT asset holding the business name,
+                from google_ads_create_text_asset. REQUIRED on accounts with Brand
+                Guidelines enabled, which refuse the create without one — and the check
+                runs at create time, so it cannot be linked afterwards.
+            logo_assets: Logo image asset resource names to link to the campaign.
             conversion_goals_json: Deprecated name for conversion_action_ids_json, kept so
                 existing callers do not break. It was documented as accepting conversion
                 action NAMES and was never read at all — the campaign optimised for the
@@ -423,10 +448,14 @@ def register_shopping_pmax_tools(mcp):
                 raw_ids = conversion_action_ids_json or conversion_goals_json
                 conversion_action_ids = None
                 if raw_ids:
-                    try:
-                        conversion_action_ids = json.loads(raw_ids)
-                    except json.JSONDecodeError:
-                        return "❌ Invalid JSON format for conversion_action_ids_json"
+                    # A list arrives when the MCP client parsed the JSON string itself.
+                    if isinstance(raw_ids, (list, tuple)):
+                        conversion_action_ids = list(raw_ids)
+                    else:
+                        try:
+                            conversion_action_ids = json.loads(raw_ids)
+                        except json.JSONDecodeError:
+                            return "❌ Invalid JSON format for conversion_action_ids_json"
                     if not isinstance(conversion_action_ids, list):
                         return "❌ conversion_action_ids_json must be a JSON array"
                     # A display name slipped in where an ID belongs is worth catching here:
@@ -448,9 +477,11 @@ def register_shopping_pmax_tools(mcp):
                     target_roas=target_roas,
                     target_cpa=target_cpa,
                     status=status,
-                    location_ids=[x.strip() for x in (location_ids or "").split(",") if x.strip()],
-                    language_ids=[x.strip() for x in (language_ids or "").split(",") if x.strip()],
-                    opt_out_final_url_expansion=opt_out_final_url_expansion
+                    location_ids=_as_list(location_ids),
+                    language_ids=_as_list(language_ids),
+                    opt_out_final_url_expansion=opt_out_final_url_expansion,
+                    business_name_asset=business_name_asset,
+                    logo_assets=_as_list(logo_assets)
                 )
 
                 result = shopping_manager.create_performance_max_campaign(customer_id, config)

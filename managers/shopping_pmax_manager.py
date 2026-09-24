@@ -70,6 +70,11 @@ class PerformanceMaxCampaignConfig:
     # Final URL expansion sends traffic to pages Google picks rather than the one given.
     # On by default in PMax, so opting out has to be possible for approved landing pages.
     opt_out_final_url_expansion: bool = False
+    # Accounts with Brand Guidelines enabled reject a Performance Max campaign that has
+    # no business name linked as a CampaignAsset — and the check happens at CREATE, so
+    # the link cannot be added afterwards. Revspot Autospot is such an account.
+    business_name_asset: Optional[str] = None
+    logo_assets: Optional[List[str]] = None
 
 
 class ShoppingPMaxManager:
@@ -347,6 +352,10 @@ class ShoppingPMaxManager:
         budget.name = f"{config.name} Budget"
         budget.amount_micros = int(config.budget_amount * 1_000_000)
         budget.delivery_method = self.client.enums.BudgetDeliveryMethodEnum.STANDARD
+        # Performance Max refuses a shared budget — "Bidding strategy type is
+        # incompatible with shared budget" — and the field defaults to shared, so
+        # this line is what makes the create possible at all.
+        budget.explicitly_shared = False
 
         budget_response = campaign_budget_service.mutate_campaign_budgets(
             customer_id=customer_id,
@@ -380,40 +389,69 @@ class ShoppingPMaxManager:
             .DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
         )
 
-        # Optimise for the conversion actions the caller named, by ID or resource name.
+        # NOT selective_optimization: Performance Max rejects it outright, with an error
+        # code v25 cannot name, on operations.create.selective_optimization.
+        # conversion_actions. PMax takes its conversion goals from the account's goals or
+        # from CampaignConversionGoal, which selects by CATEGORY rather than by individual
+        # action — so a list of conversion action IDs has nowhere to go here. Rejected up
+        # front rather than accepted and dropped, which is the bug this replaced.
         if config.conversion_action_ids:
-            conversion_action_service = self.client.get_service("ConversionActionService")
-            for identifier in config.conversion_action_ids:
-                identifier = str(identifier).strip()
-                resource_name = (
-                    identifier
-                    if identifier.startswith("customers/")
-                    else conversion_action_service.conversion_action_path(
-                        customer_id, identifier
-                    )
-                )
-                campaign.selective_optimization.conversion_actions.append(resource_name)
+            raise ValueError(
+                "Performance Max does not take individual conversion actions: the API "
+                "rejects selective_optimization on this channel type. Its goals come from "
+                "the account's conversion goals, or from campaign conversion goals, which "
+                "select by category. Leave conversion_action_ids unset."
+            )
 
         # url_expansion_opt_out no longer exists on Campaign — in v25 the control is an
         # asset automation setting, so opting out means opting OUT of the automation.
         if config.opt_out_final_url_expansion:
-            setting = self.client.get_type("AssetAutomationSetting")
-            setting.asset_automation_type = (
-                self.client.enums.AssetAutomationTypeEnum
-                .FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION
-            )
-            setting.asset_automation_status = (
-                self.client.enums.AssetAutomationStatusEnum.OPTED_OUT
-            )
-            campaign.asset_automation_settings.append(setting)
+            # Appended as a dict rather than built with get_type: AssetAutomationSetting
+            # is nested inside Campaign, not a top-level type, so get_type answers
+            # "Specified type 'AssetAutomationSetting' does not exist in Google Ads API
+            # v25". proto-plus constructs the element from a mapping.
+            campaign.asset_automation_settings.append({
+                "asset_automation_type": (
+                    self.client.enums.AssetAutomationTypeEnum
+                    .FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION
+                ),
+                "asset_automation_status": (
+                    self.client.enums.AssetAutomationStatusEnum.OPTED_OUT
+                ),
+            })
 
-        # Create campaign
-        response = campaign_service.mutate_campaigns(
-            customer_id=customer_id,
-            operations=[campaign_operation]
+        # One atomic mutate for the campaign and the assets it must be created with.
+        # The Brand Guidelines check runs at create time, so linking the business name
+        # afterwards is too late — the campaign is refused before it exists.
+        googleads_service = self.client.get_service("GoogleAdsService")
+        temp_campaign = googleads_service.campaign_path(customer_id, "-1")
+        campaign.resource_name = temp_campaign
+
+        operations = []
+        wrapper = self.client.get_type("MutateOperation")
+        self.client.copy_from(wrapper.campaign_operation, campaign_operation)
+        operations.append(wrapper)
+
+        def _link(asset_resource_name, field_type):
+            op = self.client.get_type("MutateOperation")
+            link = op.campaign_asset_operation.create
+            link.campaign = temp_campaign
+            link.asset = asset_resource_name
+            link.field_type = self.client.enums.AssetFieldTypeEnum[field_type]
+            operations.append(op)
+
+        if config.business_name_asset:
+            _link(config.business_name_asset, "BUSINESS_NAME")
+        for logo in config.logo_assets or []:
+            _link(logo, "LOGO")
+
+        response = googleads_service.mutate(
+            customer_id=customer_id, mutate_operations=operations
         )
 
-        campaign_resource_name = response.results[0].resource_name
+        campaign_resource_name = (
+            response.mutate_operation_responses[0].campaign_result.resource_name
+        )
         campaign_id = campaign_resource_name.split('/')[-1]
 
         # Locations and languages are campaign criteria, added after the campaign exists.
@@ -428,7 +466,7 @@ class ShoppingPMaxManager:
             'budget': config.budget_amount,
             'status': (config.status or 'PAUSED').upper(),
             'bidding_strategy': 'TARGET_ROAS' if config.target_roas else 'MAXIMIZE_CONVERSIONS',
-            'conversion_actions': list(config.conversion_action_ids or []),
+            'business_name_asset': config.business_name_asset,
             'final_url_expansion': not config.opt_out_final_url_expansion,
             **criteria,
         }

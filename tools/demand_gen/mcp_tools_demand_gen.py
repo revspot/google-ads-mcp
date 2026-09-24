@@ -13,7 +13,7 @@ money once enabled and the server holds one credential shared by every caller.
 """
 
 import json
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from managers.demand_gen_manager import DemandGenManager
 from utils.auth_manager import get_auth_manager
@@ -25,7 +25,7 @@ performance_logger = get_performance_logger()
 audit_logger = get_audit_logger()
 
 
-def _ids(value: Optional[str]) -> Optional[List[str]]:
+def _ids(value=None) -> Optional[List[str]]:
     """A list of identifiers, given as a JSON array or comma-separated.
 
     Safe to split on commas because none of the things this parses — numeric IDs and
@@ -34,7 +34,7 @@ def _ids(value: Optional[str]) -> Optional[List[str]]:
     return _parse_list(value)
 
 
-def _copy(value: Optional[str], field: str) -> Optional[List[str]]:
+def _copy(value=None, field: str = "") -> Optional[List[str]]:
     """A list of ad copy, given as a JSON array or as a single string.
 
     NOT comma-separated. Ad copy contains commas as a matter of course — "One Agent, Full
@@ -49,11 +49,19 @@ def _copy(value: Optional[str], field: str) -> Optional[List[str]]:
     return parsed
 
 
-def _parse_list(value: Optional[str], split_on_commas: bool = True) -> Optional[List[str]]:
-    """JSON array if it looks like one, else a delimited or single value."""
+def _parse_list(value=None, split_on_commas: bool = True) -> Optional[List[str]]:
+    """JSON array if it looks like one, else a delimited or single value.
+
+    Accepts an actual list too. MCP clients do not agree on what to do with a string
+    argument whose content is JSON: some send it through untouched, some parse it and
+    hand the tool a list, and the second kind fails a `str` annotation before any of this
+    code runs. Taking both costs one isinstance check.
+    """
     if value is None:
         return None
-    text = value.strip()
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value).strip()
     if not text:
         return None
     if text.startswith("["):
@@ -159,9 +167,9 @@ def register_demand_gen_tools(mcp):
         campaign_id: str,
         name: str,
         status: str = "PAUSED",
-        audience_ids: Optional[str] = None,
-        location_ids: Optional[str] = None,
-        language_ids: Optional[str] = None,
+        audience_ids: Optional[Union[str, List[str]]] = None,
+        location_ids: Optional[Union[str, List[str]]] = None,
+        language_ids: Optional[Union[str, List[str]]] = None,
     ) -> str:
         """
         Create an ad group in a Demand Gen campaign.
@@ -232,13 +240,13 @@ def register_demand_gen_tools(mcp):
         customer_id: str,
         ad_group_id: str,
         final_url: str,
-        headlines: str,
-        descriptions: str,
+        headlines: Union[str, List[str]],
+        descriptions: Union[str, List[str]],
         business_name: str,
-        logo_asset_resource_names: str,
-        marketing_image_resource_names: Optional[str] = None,
-        square_image_resource_names: Optional[str] = None,
-        portrait_image_resource_names: Optional[str] = None,
+        logo_asset_resource_names: Union[str, List[str]],
+        marketing_image_resource_names: Optional[Union[str, List[str]]] = None,
+        square_image_resource_names: Optional[Union[str, List[str]]] = None,
+        portrait_image_resource_names: Optional[Union[str, List[str]]] = None,
         call_to_action: Optional[str] = None,
         status: str = "PAUSED",
         ad_name: Optional[str] = None,
